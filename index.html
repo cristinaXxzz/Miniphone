@@ -78,7 +78,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <script src="avatar-frames.js"></script>
-    <script src="x-integrations.js?v=20260621-role-api-music-playlists" defer></script>
+    <script src="x-integrations.js?v=20260621-player-controls-login-persist" defer></script>
 
     <style></style>
 
@@ -30838,11 +30838,7 @@ ${libraryList}
           state.musicState.totalElapsedTime = chat.musicData.totalTime || 0;
           state.musicState.isActive = true;
           state.musicState.activeChatId = chatId;
-          if (state.musicState.playlist.length > 0) {
-            state.musicState.currentIndex = 0;
-          } else {
-            state.musicState.currentIndex = -1;
-          }
+          state.musicState.currentIndex = getFirstPlayableTrackIndex();
           if (state.musicState.timerId) clearInterval(state.musicState.timerId);
           state.musicState.timerId = setInterval(() => {
             if (state.musicState.isPlaying) {
@@ -31060,6 +31056,13 @@ ${libraryList}
           });
         }
 
+        function getFirstPlayableTrackIndex() {
+          const playlist = state.musicState.playlist || [];
+          if (!playlist.length) return -1;
+          const firstRealTrack = playlist.findIndex((track) => !track.isKeepAlive);
+          return firstRealTrack > -1 ? firstRealTrack : 0;
+        }
+
         /**
          * 加载歌曲，支持自动检测过期并续期URL
          */
@@ -31163,9 +31166,15 @@ ${libraryList}
          */
         function togglePlayPause() {
           if (audioPlayer.paused) {
-            if (state.musicState.currentIndex > -1) {
-              playSong(state.musicState.currentIndex);
+            let targetIndex = state.musicState.currentIndex;
+            if (
+              targetIndex < 0 ||
+              state.musicState.playlist[targetIndex]?.isKeepAlive
+            ) {
+              targetIndex = getFirstPlayableTrackIndex();
+              state.musicState.currentIndex = targetIndex;
             }
+            if (targetIndex > -1) playSong(targetIndex);
           } else {
             audioPlayer.pause();
 
@@ -31250,12 +31259,24 @@ ${libraryList}
             return window.state.musicState.playlist.length - 1;
           },
           openPlayer: function () {
+            const targetChatId = window.state?.activeChatId || window.state?.musicState?.activeChatId;
+            if (!window.state.musicState.isActive && targetChatId) {
+              startListenTogetherSession(targetChatId);
+            } else if (
+              window.state.musicState.currentIndex < 0 ||
+              window.state.musicState.playlist[window.state.musicState.currentIndex]?.isKeepAlive
+            ) {
+              window.state.musicState.currentIndex = getFirstPlayableTrackIndex();
+            }
             updatePlaylistUI();
             updatePlayerUI();
             document
               .getElementById("music-player-overlay")
               ?.classList.add("visible");
           },
+          togglePlayPause,
+          playNext,
+          playPrev,
           startTogether: function (chatId) {
             const targetChatId = chatId || window.state?.activeChatId;
             if (!targetChatId) {

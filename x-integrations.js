@@ -81,6 +81,7 @@
   function normalizeCookie(raw) {
     const value = String(raw || "").trim();
     if (!value) return "";
+    if (/MUSIC_U=/i.test(value)) return value;
     return value.toUpperCase().startsWith("MUSIC_U=")
       ? value
       : `MUSIC_U=${value}`;
@@ -210,10 +211,12 @@
       const cookie = normalizeCookie(cfg.cookie);
       if (cookie) headers["X-Netease-Cookie"] = cookie;
       const url = `${base}/netease${path.startsWith("/") ? path : `/${path}`}`;
+      const payload = { ...(body || {}) };
+      if (cookie && !payload.cookie) payload.cookie = cookie;
       const res = await fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(body || {}),
+        body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1621,6 +1624,7 @@ ${text}`;
       if (target.id === "x-mini-open-player" || target.id === "x-music-open-player") {
         if (window.ephoneMusicBridge?.openPlayer) {
           window.ephoneMusicBridge.openPlayer();
+          document.getElementById("x-netease-panel")?.classList.remove("visible");
           setStatus("已打开桌面播放器。");
         } else {
           setStatus("播放器尚未初始化，请稍后再试", true);
@@ -1791,6 +1795,11 @@ ${text}`;
     panel.classList.add("visible");
     renderMusicHome();
     setStatus("可搜索歌曲后加入现有“一起听”歌单");
+    if (cfg.cookie) {
+      refreshMusicProfile().catch((error) => {
+        setStatus(error.message || "登录状态读取失败，请重新扫码", true);
+      });
+    }
   }
 
   function getMemoryChats() {
