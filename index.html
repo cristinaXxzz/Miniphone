@@ -63247,23 +63247,15 @@ ${libraryList}
         // ▼▼▼ 自动登录判断 (主入口) ▼▼▼
         // ==========================================
 
-        // 检查本地是否已登录
-        const savedUid = localStorage.getItem("ephone_saved_uid");
+        // 本仓库公开部署时不再启用网页登录，直接进入应用。
+        const savedUid = localStorage.getItem("ephone_saved_uid") || "local-user";
+        localStorage.setItem("ephone_saved_uid", savedUid);
 
-        if (savedUid) {
-          console.log(`[Auto Login] 检测到已登录账号: ${savedUid}`);
-          try {
-            // 已登录：直接初始化数据库并启动，不显示登录框
-            initDatabase(savedUid);
-            init();
-          } catch (e) {
-            console.error("自动登录出错，重置状态:", e);
-            localStorage.removeItem("ephone_saved_uid");
-            renderLoginOverlay();
-          }
-        } else {
-          // 未登录：显示登录框
-          renderLoginOverlay();
+        try {
+          initDatabase(savedUid);
+          init();
+        } catch (e) {
+          console.error("应用启动出错:", e);
         }
 
         // ==========================================
