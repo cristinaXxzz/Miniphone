@@ -78,7 +78,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <script src="avatar-frames.js"></script>
-    <script src="x-integrations.js?v=20260621-player-controls-login-persist" defer></script>
+    <script src="x-integrations.js?v=20260621-player-visible-cookie-fix" defer></script>
 
     <style></style>
 
@@ -31267,6 +31267,15 @@ ${libraryList}
               window.state.musicState.playlist[window.state.musicState.currentIndex]?.isKeepAlive
             ) {
               window.state.musicState.currentIndex = getFirstPlayableTrackIndex();
+            }
+            if (targetChatId) {
+              window.state.activeChatId = targetChatId;
+              if (typeof renderChatInterface === "function") {
+                renderChatInterface(targetChatId);
+              }
+              if (typeof showScreen === "function") {
+                showScreen("chat-interface-screen");
+              }
             }
             updatePlaylistUI();
             updatePlayerUI();

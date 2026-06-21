@@ -87,6 +87,16 @@
       : `MUSIC_U=${value}`;
   }
 
+  function extractCookieFromLoginResult(result) {
+    return (
+      result?.cookie ||
+      result?.data?.cookie ||
+      result?.body?.cookie ||
+      result?.result?.cookie ||
+      ""
+    );
+  }
+
   function toHttps(url) {
     if (!url || typeof url !== "string") return url || "";
     return url.startsWith("http://") ? `https://${url.slice(7)}` : url;
@@ -1761,9 +1771,14 @@ ${text}`;
         try {
           const result = await XMusic.loginQrCheck(key, cfg);
           const code = Number(result?.code || result?.data?.code);
-          if (code === 803 || result?.cookie) {
+          const cookie = extractCookieFromLoginResult(result);
+          if (code === 803 || cookie) {
             clearInterval(timer);
-            const cookie = result.cookie || result?.data?.cookie || "";
+            if (!cookie) {
+              qrBox.textContent = "扫码确认成功，但接口没有返回 Cookie";
+              setStatus("登录接口没有返回 Cookie，请手动粘贴 MUSIC_U 或换 Worker", true);
+              return;
+            }
             const next = XMusic.saveCfg({ ...cfg, cookie });
             document.getElementById("x-music-cookie").value = next.cookie;
             qrBox.textContent = "登录成功";
