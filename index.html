@@ -24659,6 +24659,27 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
               worldBookContext = `\n\n# 核心世界观设定 (必须严格遵守以下所有设定)\n${linkedContents}\n`;
             }
           }
+          const latestMemoryQuery = chat.history
+            .filter((msg) => msg.role === "user" && !msg.isHidden)
+            .slice(-3)
+            .map((msg) =>
+              Array.isArray(msg.content)
+                ? "[图片/多模态消息]"
+                : String(msg.content || ""),
+            )
+            .join("\n");
+          let vectorMemoryContext = "";
+          if (window.XMemoryPalace) {
+            try {
+              await window.XMemoryPalace.processChatIfNeeded(chat);
+              vectorMemoryContext = await window.XMemoryPalace.buildContext(
+                chat,
+                latestMemoryQuery,
+              );
+            } catch (error) {
+              console.warn("向量记忆宫殿处理失败:", error);
+            }
+          }
           // --- 线下模式核心拦截逻辑 ---
           if (
             !chat.isGroup &&
@@ -24697,6 +24718,7 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
             # 你的角色设定
             ${chat.settings.aiPersona}
             ${summaryContext}
+            ${vectorMemoryContext}
             ${worldBookContext}
 
             # 当前情景
@@ -25964,6 +25986,7 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
 			${sharedContext}
 			${stickerContext}
 			${linkedMemoryContext}
+			${vectorMemoryContext}
 
 			# 用户的角色
 			- **${myNickname}**: ${chat.settings.myPersona}
@@ -26560,6 +26583,7 @@ ${libraryList}
 			- **世界观设定集**:
 			${worldBookContent}
 			${linkedMemoryContext}
+			${vectorMemoryContext}
 			${elemeContext}
         ${auroraContext}
 			- **可用表情包**:
@@ -30557,6 +30581,9 @@ ${libraryList}
               }
             }
             await db.chats.put(chat);
+            window.XMemoryPalace?.processChatIfNeeded(chat).catch((error) =>
+              console.warn("向量记忆宫殿自动入库失败:", error),
+            );
             checkAndTriggerSummary(chatId);
 
             // --- 续火花逻辑 ---
@@ -30627,6 +30654,9 @@ ${libraryList}
           };
           chat.history.push(msg);
           await db.chats.put(chat);
+          window.XMemoryPalace?.processChatIfNeeded(chat).catch((error) =>
+            console.warn("向量记忆宫殿自动入库失败:", error),
+          );
           checkAndTriggerSummary(state.activeChatId);
           appendMessage(msg, chat);
           renderChatList();
@@ -31193,6 +31223,21 @@ ${libraryList}
                 ?.classList.add("visible");
             }
             return window.state.musicState.playlist.length - 1;
+          },
+          openPlayer: function () {
+            updatePlaylistUI();
+            updatePlayerUI();
+            document
+              .getElementById("music-player-overlay")
+              ?.classList.add("visible");
+          },
+          startTogether: function (chatId) {
+            const targetChatId = chatId || window.state?.activeChatId;
+            if (!targetChatId) {
+              this.openPlayer();
+              return;
+            }
+            startListenTogetherSession(targetChatId);
           },
           saveGlobalPlaylist,
           updatePlaylistUI,
@@ -54521,6 +54566,9 @@ ${libraryList}
 
                   chat.history.push(msg);
                   await db.chats.put(chat);
+                  window.XMemoryPalace?.processChatIfNeeded(chat).catch(
+                    (error) => console.warn("向量记忆宫殿自动入库失败:", error),
+                  );
                   appendMessage(msg, chat);
 
                   // 清空输入框
@@ -54613,6 +54661,9 @@ ${libraryList}
               chat.history.push(msg);
               await incrementMessageCount(state.activeChatId);
               await db.chats.put(chat);
+              window.XMemoryPalace?.processChatIfNeeded(chat).catch((error) =>
+                console.warn("向量记忆宫殿自动入库失败:", error),
+              );
               appendMessage(msg, chat);
               renderChatList();
               chatInput.value = "";

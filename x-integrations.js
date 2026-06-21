@@ -16,6 +16,17 @@
     model: "BAAI/bge-m3",
     dimensions: 1024,
   };
+  const MEMORY_CHUNK_SIZE = 70;
+  const MEMORY_ROOMS = {
+    living_room: "客厅 - 日常闲聊、近期互动",
+    bedroom: "卧室 - 亲密情感、深层羁绊",
+    study: "书房 - 工作学习、技能成长",
+    user_room: "用户房间 - 用户个人信息、习惯",
+    self_room: "自我房间 - 角色自我认同、变化",
+    trauma_room: "创伤房间 - 伤害、恐惧、冲突与保护性记忆",
+    attic: "阁楼 - 未消化的困惑、潜意识",
+    windowsill: "窗台 - 期盼、目标、憧憬",
+  };
 
   function readJson(key, fallback) {
     try {
@@ -388,6 +399,262 @@
     },
   };
 
+  function memoryProgressKey(chatId) {
+    return `x_memory_last_index_${chatId || "global"}`;
+  }
+
+  function memoryEnabledKey(chatId) {
+    return `x_memory_enabled_${chatId || "global"}`;
+  }
+
+  function isMemoryEnabled(chatId) {
+    return localStorage.getItem(memoryEnabledKey(chatId)) !== "false";
+  }
+
+  function setMemoryEnabled(chatId, enabled) {
+    localStorage.setItem(memoryEnabledKey(chatId), enabled ? "true" : "false");
+  }
+
+  function visibleChatMessages(chat) {
+    return (chat?.history || []).filter(
+      (msg) =>
+        msg &&
+        !msg.isHidden &&
+        msg.type !== "summary" &&
+        (msg.role === "user" || msg.role === "assistant" || msg.role === "system"),
+    );
+  }
+
+  function formatMemoryMessage(msg, chat) {
+    const time = msg.timestamp
+      ? new Date(msg.timestamp).toLocaleString("zh-CN")
+      : "";
+    const sender =
+      msg.role === "user"
+        ? chat?.settings?.myNickname || "我"
+        : msg.senderName || chat?.name || "角色";
+    let content = "";
+    if (Array.isArray(msg.content)) {
+      content = "[图片/多模态消息]";
+    } else if (msg.type === "sticker") {
+      content = msg.meaning ? `[表情: ${msg.meaning}]` : "[表情]";
+    } else if (msg.type === "voice_message") {
+      content = `[语音] ${msg.content || ""}`;
+    } else if (msg.type === "ai_image" || msg.type === "user_photo") {
+      content = `[图片] ${msg.content || msg.description || ""}`;
+    } else if (msg.type === "transfer") {
+      content = `[转账] ${msg.amount || ""} ${msg.note || ""}`;
+    } else if (msg.type === "pat_message") {
+      content = `[系统事件] ${msg.content || ""}`;
+    } else {
+      content = String(msg.content || msg.message || "");
+    }
+    return `${time} ${sender}: ${content}`.trim();
+  }
+
+  function classifyRoom(text) {
+    const t = String(text || "").toLowerCase();
+    const tests = [
+      ["trauma_room", /受伤|害怕|恐惧|背叛|吵架|崩溃|讨厌|痛苦|哭|拉黑|分手|失望|绝望|trauma|hurt|fear/],
+      ["bedroom", /喜欢|爱你|想你|亲密|抱|吻|情侣|暧昧|心动|宝贝|晚安|想抱|love|miss/],
+      ["study", /学习|工作|考试|项目|代码|计划|任务|资料|写作|作业|复习|研究|study|work|code/],
+      ["user_room", /我喜欢|我讨厌|我的习惯|我的生日|我家|我的|用户|昵称|头像|住在|喜欢吃|不喜欢/],
+      ["self_room", /你觉得|你想|你的过去|你的设定|人设|身份|你是谁|自我|角色|persona/],
+      ["windowsill", /以后|未来|约定|期待|希望|梦想|想去|目标|下次|明天|生日|旅行|promise|future/],
+      ["attic", /不知道|困惑|矛盾|奇怪|也许|可能|梦|隐约|说不清|confused|maybe/],
+    ];
+    const found = tests.find(([, re]) => re.test(t));
+    return found ? found[0] : "living_room";
+  }
+
+  function localExtractMemories(chat, chunk, startIndex) {
+    const text = chunk.map((msg) => formatMemoryMessage(msg, chat)).join("\n");
+    const room = classifyRoom(text);
+    const title = `${chat?.name || "聊天"}的第 ${startIndex + 1}-${startIndex + chunk.length} 条记录`;
+    return [
+      {
+        content: `${title}\n${text}`.slice(0, 8000),
+        room,
+        tags: [chat?.name || "chat", "auto_chunk"],
+        importance: room === "trauma_room" || room === "bedroom" ? 8 : 5,
+      },
+    ];
+  }
+
+  function parseJsonArrayLoose(text) {
+    const raw = String(text || "")
+      .replace(/^```json\s*/i, "")
+      .replace(/```$/i, "")
+      .trim();
+    const first = raw.indexOf("[");
+    const last = raw.lastIndexOf("]");
+    if (first === -1 || last <= first) return null;
+    return JSON.parse(raw.slice(first, last + 1));
+  }
+
+  async function callChatModelForMemory(prompt) {
+    const cfg = window.state?.apiConfig || {};
+    if (!cfg.proxyUrl || !cfg.apiKey || !cfg.model) {
+      throw new Error("主聊天 API 未配置");
+    }
+    const apiKey =
+      typeof window.getRandomValue === "function"
+        ? window.getRandomValue(cfg.apiKey)
+        : String(cfg.apiKey).split(/[,，\n]/)[0].trim();
+    if (/generativelanguage\.googleapis\.com|gemini/i.test(cfg.proxyUrl)) {
+      throw new Error("Gemini 记忆提炼暂走本地提取");
+    }
+    const res = await fetch(`${cfg.proxyUrl.replace(/\/+$/, "")}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.2,
+        stream: false,
+      }),
+    });
+    if (!res.ok) throw new Error(`记忆提取 API ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content || "";
+  }
+
+  async function extractMemories(chat, chunk, startIndex) {
+    const text = chunk.map((msg) => formatMemoryMessage(msg, chat)).join("\n");
+    const roomList = Object.entries(MEMORY_ROOMS)
+      .map(([key, label]) => `- ${key}: ${label}`)
+      .join("\n");
+    const prompt = `你要把下面一段聊天记录提炼成长期记忆，并按房间分类。
+
+房间只能从这些 key 里选：
+${roomList}
+
+要求：
+- 输出严格 JSON 数组，不要 Markdown。
+- 每条记忆格式：{"content":"第三人称/事实性记忆，保留人物、事件、情绪和重要细节","room":"living_room","tags":["短标签"],"importance":1-10}
+- 只保留以后聊天真的有用的内容，最多 8 条。
+- 如果内容很普通，也至少输出 1 条概括性记忆。
+
+聊天记录：
+${text}`;
+    try {
+      const response = await callChatModelForMemory(prompt);
+      const parsed = parseJsonArrayLoose(response);
+      if (Array.isArray(parsed) && parsed.length) {
+        return parsed
+          .map((item) => ({
+            content: String(item.content || "").trim(),
+            room: MEMORY_ROOMS[item.room] ? item.room : classifyRoom(item.content),
+            tags: Array.isArray(item.tags) ? item.tags.slice(0, 8) : [],
+            importance: Math.max(1, Math.min(10, Number(item.importance || 5))),
+          }))
+          .filter((item) => item.content);
+      }
+    } catch (error) {
+      console.warn("[XMemoryPalace] LLM extraction failed, fallback local chunk", error);
+    }
+    return localExtractMemories(chat, chunk, startIndex);
+  }
+
+  function getEmbeddingCfgOrNull() {
+    const cfg = loadVectorCfg();
+    return cfg.baseUrl && cfg.apiKey && cfg.model ? cfg : null;
+  }
+
+  const XMemoryPalace = {
+    rooms: MEMORY_ROOMS,
+    chunkSize: MEMORY_CHUNK_SIZE,
+    isEnabled: isMemoryEnabled,
+    setEnabled: setMemoryEnabled,
+
+    getProgress(chatId) {
+      return Number(localStorage.getItem(memoryProgressKey(chatId)) || 0);
+    },
+
+    setProgress(chatId, index) {
+      localStorage.setItem(memoryProgressKey(chatId), String(Math.max(0, index)));
+    },
+
+    async processChatIfNeeded(chat, options = {}) {
+      if (!chat?.id || !isMemoryEnabled(chat.id)) return { processed: 0 };
+      const messages = visibleChatMessages(chat);
+      let cursor = options.fromIndex ?? XMemoryPalace.getProgress(chat.id);
+      let processed = 0;
+      const embeddingCfg = getEmbeddingCfgOrNull();
+
+      while (messages.length - cursor >= MEMORY_CHUNK_SIZE) {
+        const chunk = messages.slice(cursor, cursor + MEMORY_CHUNK_SIZE);
+        const extracted = await extractMemories(chat, chunk, cursor);
+        for (const item of extracted) {
+          const node = await XVectorStore.addMemory(
+            {
+              charId: chat.id,
+              content: item.content,
+              room: item.room,
+              tags: ["auto_memory", ...(item.tags || [])],
+              importance: item.importance,
+              metadata: {
+                chatId: chat.id,
+                chatName: chat.name,
+                source: "chat_auto_70",
+                startIndex: cursor,
+                endIndex: cursor + chunk.length - 1,
+                createdFromMessages: chunk.length,
+              },
+            },
+            embeddingCfg || undefined,
+          );
+          if (!embeddingCfg) {
+            console.warn("[XMemoryPalace] saved memory without vector; configure embedding to enable semantic recall", node.id);
+          }
+        }
+        cursor += MEMORY_CHUNK_SIZE;
+        XMemoryPalace.setProgress(chat.id, cursor);
+        processed += chunk.length;
+      }
+      return { processed, cursor };
+    },
+
+    async buildContext(chat, queryText, limit = 6) {
+      if (!chat?.id || !isMemoryEnabled(chat.id)) return "";
+      const embeddingCfg = getEmbeddingCfgOrNull();
+      let results = [];
+      if (embeddingCfg && queryText) {
+        try {
+          results = await XVectorStore.search({
+            charId: chat.id,
+            query: queryText,
+            embeddingConfig: embeddingCfg,
+            limit,
+          });
+        } catch (error) {
+          console.warn("[XMemoryPalace] vector recall failed, fallback latest", error);
+        }
+      }
+      if (!results.length) {
+        const all = await XVectorStore.listMemories(chat.id);
+        results = all
+          .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+          .slice(0, limit)
+          .map((node) => ({ node, score: null }));
+      }
+      if (!results.length) return "";
+      const body = results
+        .map((item, index) => {
+          const node = item.node || item;
+          const roomLabel = MEMORY_ROOMS[node.room] || node.room || "客厅";
+          const score =
+            typeof item.score === "number" ? `，相关度 ${item.score.toFixed(2)}` : "";
+          return `${index + 1}. 【${roomLabel}${score}】${node.content}`;
+        })
+        .join("\n");
+      return `\n\n# 向量记忆宫殿召回（长期记忆，按房间分类）\n${body}\n`;
+    },
+  };
+
   function ensurePanel() {
     let panel = document.getElementById("x-netease-panel");
     if (panel) return panel;
@@ -565,6 +832,7 @@
             <button id="x-music-save" class="x-netease-btn" type="button">保存配置</button>
             <button id="x-music-test" class="x-netease-btn secondary" type="button">测试登录</button>
             <button id="x-music-qr" class="x-netease-btn secondary" type="button">扫码登录</button>
+            <button id="x-music-open-player" class="x-netease-btn secondary" type="button">打开播放器</button>
             <button id="x-music-daily" class="x-netease-btn secondary" type="button">日推</button>
             <button id="x-music-fm" class="x-netease-btn secondary" type="button">私人 FM</button>
           </div>
@@ -618,14 +886,18 @@
           <div class="x-netease-title" title="${song.name}">${song.name}</div>
           <div class="x-netease-artist" title="${song.artist}">${song.artist}</div>
         </div>
-        <button class="x-netease-add" type="button">加入</button>
+        <div style="display:flex; gap:6px;">
+          <button class="x-netease-add" type="button" data-action="add">加入</button>
+          <button class="x-netease-add" type="button" data-action="play" style="background:#cd8d8d;">播放</button>
+        </div>
       `;
-      item.querySelector("button").addEventListener("click", () => addSong(song));
+      item.querySelector('[data-action="add"]').addEventListener("click", () => addSong(song, false));
+      item.querySelector('[data-action="play"]').addEventListener("click", () => addSong(song, true));
       box.appendChild(item);
     });
   }
 
-  async function addSong(song) {
+  async function addSong(song, playNow) {
     const cfg = getPanelCfg();
     setStatus(`正在获取《${song.name}》播放链接...`);
     try {
@@ -648,13 +920,13 @@
         addedAt: Date.now(),
       };
       if (window.ephoneMusicBridge?.addTrack) {
-        await window.ephoneMusicBridge.addTrack(track, { playNow: false });
+        await window.ephoneMusicBridge.addTrack(track, { playNow });
       } else if (window.state?.musicState?.playlist) {
         window.state.musicState.playlist.push(track);
       } else {
         throw new Error("播放器还没准备好，请稍后再试");
       }
-      setStatus(`已加入《${song.name}》到一起听歌单`);
+      setStatus(playNow ? `正在播放《${song.name}》` : `已加入《${song.name}》到一起听歌单`);
     } catch (error) {
       console.error("[XMusic] add song failed", error);
       setStatus(error.message || "添加失败", true);
@@ -692,6 +964,15 @@
         setStatus(profile ? `已登录：${profile.nickname}` : "未登录或 Cookie 无效");
       } catch (error) {
         setStatus(error.message || "测试失败", true);
+      }
+    });
+
+    document.getElementById("x-music-open-player").addEventListener("click", () => {
+      if (window.ephoneMusicBridge?.openPlayer) {
+        window.ephoneMusicBridge.openPlayer();
+        setStatus("已打开桌面播放器。聊天页右上角的“一起听”也使用这份歌单。");
+      } else {
+        setStatus("播放器尚未初始化，请稍后再试", true);
       }
     });
 
@@ -1011,6 +1292,7 @@
   function boot() {
     window.XMusic = XMusic;
     window.XVectorStore = XVectorStore;
+    window.XMemoryPalace = XMemoryPalace;
     installDesktopIcon();
   }
 
