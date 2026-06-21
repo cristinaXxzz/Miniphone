@@ -78,7 +78,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <script src="avatar-frames.js"></script>
-    <script src="x-integrations.js?v=20260621-memory-palace-music" defer></script>
+    <script src="x-integrations.js?v=20260621-role-api-music-playlists" defer></script>
 
     <style></style>
 
@@ -16350,6 +16350,28 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
         // 没有逗号则直接返回原字符串
         return str;
       }
+      function getEffectiveChatApiConfig(chat) {
+        const roleApi = chat?.settings?.roleApi;
+        if (
+          roleApi &&
+          roleApi.enabled &&
+          roleApi.proxyUrl &&
+          roleApi.apiKey &&
+          roleApi.model
+        ) {
+          return {
+            ...state.apiConfig,
+            proxyUrl: roleApi.proxyUrl,
+            apiKey: roleApi.apiKey,
+            model: roleApi.model,
+            temperature:
+              typeof roleApi.temperature === "number"
+                ? roleApi.temperature
+                : parseFloat(roleApi.temperature) || state.apiConfig.temperature,
+          };
+        }
+        return state.apiConfig;
+      }
       function isImage(text, content) {
         let currentImageData = content.image_url.url;
         // 提取Base64数据（去掉前缀）
@@ -24777,7 +24799,8 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
             }
 
             try {
-              const { proxyUrl, apiKey, model } = state.apiConfig;
+              const chatApiConfig = getEffectiveChatApiConfig(chat);
+              const { proxyUrl, apiKey, model } = chatApiConfig;
               let isGemini = proxyUrl === GEMINI_API_URL;
               let requestBody;
               let requestUrl = isGemini
@@ -24797,7 +24820,7 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
                     parts: [{ text: item.content }],
                   })),
                   generationConfig: {
-                    temperature: parseFloat(state.apiConfig.temperature) || 0.8,
+                    temperature: parseFloat(chatApiConfig.temperature) || 0.8,
                   },
                   systemInstruction: { parts: [{ text: offlineSystemPrompt }] },
                 };
@@ -24808,7 +24831,7 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
                     { role: "system", content: offlineSystemPrompt },
                     ...messagesForOfflineMode,
                   ],
-                  temperature: parseFloat(state.apiConfig.temperature) || 0.8,
+                  temperature: parseFloat(chatApiConfig.temperature) || 0.8,
                   stream: false,
                 };
               }
@@ -25196,7 +25219,8 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
 			`;
           }
 
-          const { proxyUrl, apiKey, model } = state.apiConfig;
+          const preflightApiConfig = getEffectiveChatApiConfig(chat);
+          const { proxyUrl, apiKey, model } = preflightApiConfig;
           const isApiBlocked = BLOCKED_API_SITES.some((blockedDomain) =>
             proxyUrl.includes(blockedDomain),
           );
@@ -25357,7 +25381,8 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
           }
 
           try {
-            const { proxyUrl, apiKey, model } = state.apiConfig;
+            const chatApiConfig = getEffectiveChatApiConfig(chat);
+            const { proxyUrl, apiKey, model } = chatApiConfig;
             if (!proxyUrl || !apiKey || !model) {
               alert("请先在API设置中配置反代地址、密钥并选择模型。");
               // 无论成功失败，都要隐藏输入提示
@@ -25435,7 +25460,7 @@ lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer
                         model: model,
                         messages: messagesForDecision,
                         temperature:
-                          parseFloat(state.apiConfig.temperature) || 0.8,
+                          parseFloat(chatApiConfig.temperature) || 0.8,
                       }),
                     });
 
@@ -26985,7 +27010,7 @@ ${libraryList}
                       { role: "system", content: systemPrompt },
                       ...messagesPayload,
                     ],
-                    temperature: parseFloat(state.apiConfig.temperature) || 0.8,
+                    temperature: parseFloat(chatApiConfig.temperature) || 0.8,
                     stream: false,
                   }),
                 });

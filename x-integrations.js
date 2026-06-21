@@ -6,6 +6,8 @@
   const LIGHT_LLM_CFG_KEY = "x_memory_light_llm_cfg_v1";
   const RERANK_CFG_KEY = "x_memory_rerank_cfg_v1";
   const REMOTE_VECTOR_CFG_KEY = "x_memory_remote_vector_cfg_v1";
+  const ROLE_PLAYLISTS_KEY = "x_netease_role_playlists_v1";
+  const GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models";
   const VECTOR_DB_NAME = "MiniphoneXVectorDB";
   const VECTOR_DB_VERSION = 1;
   const DEFAULT_MUSIC_CFG = {
@@ -89,12 +91,83 @@
     return url.startsWith("http://") ? `https://${url.slice(7)}` : url;
   }
 
+  function firstApiKey(apiKey) {
+    const value = String(apiKey || "");
+    if (typeof window.getRandomValue === "function") return window.getRandomValue(value);
+    return value.split(/[,，\n]/)[0].trim();
+  }
+
+  function modelListUrl(baseUrl) {
+    const base = String(baseUrl || "").replace(/\/+$/, "");
+    if (!base) return "";
+    if (/generativelanguage\.googleapis\.com|gemini/i.test(base)) {
+      return GEMINI_MODELS_URL;
+    }
+    return /\/v1$/i.test(base) ? `${base}/models` : `${base}/v1/models`;
+  }
+
+  async function fetchModelList(baseUrl, apiKey) {
+    const url = modelListUrl(baseUrl);
+    if (!url || !apiKey) throw new Error("请先填写 Base URL 和 API Key");
+    const isGemini = url === GEMINI_MODELS_URL;
+    const res = await fetch(
+      isGemini ? `${url}?key=${encodeURIComponent(firstApiKey(apiKey))}` : url,
+      isGemini
+        ? undefined
+        : { headers: { Authorization: `Bearer ${firstApiKey(apiKey)}` } },
+    );
+    if (!res.ok) throw new Error(`模型列表 ${res.status}: ${(await res.text()).slice(0, 180)}`);
+    const data = await res.json();
+    const rows = isGemini ? data.models || [] : data.data || data.models || [];
+    return rows
+      .map((item) => {
+        const raw = item.id || item.name || item.model || "";
+        const id = isGemini && raw.includes("/") ? raw.split("/").pop() : raw;
+        return String(id || "").trim();
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+  }
+
   function getArtists(song) {
     const list = song?.ar || song?.artists || [];
     if (Array.isArray(list) && list.length) {
       return list.map((item) => item.name).filter(Boolean).join(" / ");
     }
     return song?.artist || song?.artists || "未知歌手";
+  }
+
+  function getCurrentChatForIntegrations() {
+    const chats = window.state?.chats || {};
+    const activeId = window.state?.activeChatId || window.state?.currentChatId;
+    return (activeId && chats[activeId]) || null;
+  }
+
+  function loadRolePlaylists() {
+    return readJson(ROLE_PLAYLISTS_KEY, {});
+  }
+
+  function saveRolePlaylists(data) {
+    writeJson(ROLE_PLAYLISTS_KEY, data || {});
+  }
+
+  function getRolePlaylist(chatId) {
+    const all = loadRolePlaylists();
+    return Array.isArray(all[chatId]) ? all[chatId] : [];
+  }
+
+  function setRolePlaylist(chatId, songs) {
+    const all = loadRolePlaylists();
+    all[chatId] = (songs || []).map((song) => ({
+      id: Number(song.id),
+      name: song.name || "未知歌曲",
+      artist: song.artist || getArtists(song),
+      album: song.album || getAlbum(song).name || "",
+      cover: song.cover || toHttps(getAlbum(song).picUrl || ""),
+      raw: song.raw || song,
+    }));
+    saveRolePlaylists(all);
+    return all[chatId];
   }
 
   function getAlbum(song) {
@@ -192,6 +265,10 @@
 
     userPlaylist(uid, cfg) {
       return XMusic.call("/user/playlist", { uid, limit: 60 }, cfg);
+    },
+
+    userDetail(uid, cfg) {
+      return XMusic.call("/user/detail", { uid: Number(uid) }, cfg);
     },
 
     playlistTrackAll(id, cfg, limit = 50, offset = 0) {
@@ -766,6 +843,137 @@ ${text}`;
     selectedRoom: "living_room",
   };
 
+  async function persistActiveChatSettings() {
+    const chat = getCurrentChatForIntegrations();
+    if (!chat) return null;
+    if (!chat.settings) chat.settings = {};
+    chat.settings.roleApi = {
+      enabled: document.getElementById("x-role-api-enabled")?.checked || false,
+      proxyUrl: document.getElementById("x-role-api-base-url")?.value.trim() || "",
+      apiKey: document.getElementById("x-role-api-key")?.value.trim() || "",
+      model: document.getElementById("x-role-api-model")?.value.trim() || "",
+      temperature: Number(document.getElementById("x-role-api-temperature")?.value || 0.8),
+    };
+    try {
+      if (typeof db !== "undefined" && db?.chats?.put) await db.chats.put(chat);
+    } catch (error) {
+      console.warn("[XIntegrations] role api settings saved in memory only", error);
+    }
+    return chat.settings.roleApi;
+  }
+
+  function fillRoleApiPanel() {
+    const card = document.getElementById("x-role-api-card");
+    if (!card) return;
+    const chat = getCurrentChatForIntegrations();
+    const cfg = chat?.settings?.roleApi || {};
+    card.style.display = chat ? "block" : "none";
+    document.getElementById("x-role-api-title").textContent = chat
+      ? `角色独立 API · ${chat.name || "当前聊天"}`
+      : "角色独立 API";
+    document.getElementById("x-role-api-enabled").checked = Boolean(cfg.enabled);
+    document.getElementById("x-role-api-base-url").value = cfg.proxyUrl || "";
+    document.getElementById("x-role-api-key").value = cfg.apiKey || "";
+    document.getElementById("x-role-api-model").value = cfg.model || "";
+    document.getElementById("x-role-api-temperature").value = cfg.temperature ?? 0.8;
+  }
+
+  function installRoleApiSettingsPanel() {
+    if (document.getElementById("x-role-api-card")) {
+      fillRoleApiPanel();
+      return;
+    }
+    const modalBody = document.querySelector("#chat-settings-modal .moe-settings-body");
+    if (!modalBody) return;
+    const card = document.createElement("div");
+    card.id = "x-role-api-card";
+    card.className = "settings-group-card moe-card";
+    card.innerHTML = `
+      <div class="settings-section-title" id="x-role-api-title">角色独立 API</div>
+      <div class="form-group">
+        <label class="toggle-switch-label">
+          <span class="toggle-switch-text">启用当前角色独立 API</span>
+          <input type="checkbox" id="x-role-api-enabled" />
+          <span class="toggle-switch-slider"></span>
+        </label>
+      </div>
+      <div class="form-group">
+        <label>Base URL / 反代地址</label>
+        <input id="x-role-api-base-url" class="moe-input" type="url" placeholder="https://api.openai.com 或 Gemini models 地址" />
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <input id="x-role-api-key" class="moe-input" type="password" />
+      </div>
+      <div class="form-group">
+        <label>模型</label>
+        <input id="x-role-api-model" class="moe-input" type="text" placeholder="选择或手动输入模型" />
+        <select id="x-role-api-model-list" class="moe-input" style="display:none;margin-top:6px;"></select>
+      </div>
+      <div class="form-group">
+        <label>Temperature</label>
+        <input id="x-role-api-temperature" class="moe-input" type="number" min="0" max="2" step="0.1" />
+      </div>
+      <button id="x-role-api-fetch-models" class="moe-btn-secondary" type="button">📡 拉取角色模型列表</button>
+      <button id="x-role-api-save" class="moe-btn-secondary" type="button" style="margin-top:8px;">保存角色 API</button>
+      <p id="x-role-api-status" style="font-size:12px;color:#888;margin:8px 0 0;"></p>
+    `;
+    modalBody.insertBefore(card, modalBody.children[1] || null);
+    card.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const status = document.getElementById("x-role-api-status");
+      if (target.id === "x-role-api-save") {
+        await persistActiveChatSettings();
+        if (status) status.textContent = "已保存当前角色独立 API。";
+      }
+      if (target.id === "x-role-api-fetch-models") {
+        if (status) status.textContent = "正在拉取模型列表...";
+        try {
+          const models = await fetchModelList(
+            document.getElementById("x-role-api-base-url").value,
+            document.getElementById("x-role-api-key").value,
+          );
+          fillModelSelect("x-role-api-model-list", "x-role-api-model", models);
+          if (status) status.textContent = `已拉取 ${models.length} 个模型。`;
+        } catch (error) {
+          if (status) status.textContent = error.message || "拉取失败";
+        }
+      }
+    });
+    document.getElementById("save-chat-settings-btn")?.addEventListener(
+      "click",
+      () => {
+        persistActiveChatSettings();
+      },
+      true,
+    );
+    document.getElementById("chat-settings-btn")?.addEventListener("click", () => {
+      setTimeout(() => {
+        installRoleApiSettingsPanel();
+        fillRoleApiPanel();
+      }, 120);
+    });
+    fillRoleApiPanel();
+  }
+
+  function fillModelSelect(selectId, inputId, models) {
+    const select = document.getElementById(selectId);
+    const input = document.getElementById(inputId);
+    if (!select || !input) return;
+    select.innerHTML = `<option value="">▼ 选择已拉取的模型</option>`;
+    models.forEach((model) => {
+      const option = document.createElement("option");
+      option.value = model;
+      option.textContent = model;
+      select.appendChild(option);
+    });
+    select.style.display = "block";
+    select.onchange = () => {
+      if (select.value) input.value = select.value;
+    };
+  }
+
   function ensureIntegrationStyles() {
     if (document.getElementById("x-integrations-styles")) return;
     const style = document.createElement("style");
@@ -1110,6 +1318,9 @@ ${text}`;
                   <option value="exhigh">exhigh</option>
                   <option value="lossless">lossless</option>
                   <option value="hires">hires</option>
+                  <option value="jyeffect">jyeffect</option>
+                  <option value="sky">sky</option>
+                  <option value="jymaster">jymaster</option>
                 </select>
               </div>
               <div class="x-action-row">
@@ -1214,6 +1425,38 @@ ${text}`;
     `;
   }
 
+  function extractNeteaseProfile(data) {
+    return (
+      data?.data?.profile ||
+      data?.profile ||
+      data?.data?.account?.profile ||
+      data?.account?.profile ||
+      null
+    );
+  }
+
+  function extractNeteaseUid(data) {
+    const profile = extractNeteaseProfile(data);
+    return (
+      profile?.userId ||
+      data?.data?.account?.id ||
+      data?.account?.id ||
+      data?.data?.userId ||
+      data?.userId ||
+      null
+    );
+  }
+
+  function extractNeteasePlaylists(data) {
+    return (
+      data?.playlist ||
+      data?.data?.playlist ||
+      data?.result?.playlist ||
+      data?.playlists ||
+      []
+    );
+  }
+
   function renderSongs(songs) {
     musicUiState.songs = songs.map(compactSong);
     musicUiState.tab = "search";
@@ -1253,8 +1496,19 @@ ${text}`;
     renderMusicMini();
     const box = document.getElementById("x-music-main-content");
     if (!box) return;
+    const roleChat = getCurrentChatForIntegrations();
+    const rolePlaylist = roleChat ? getRolePlaylist(roleChat.id) : [];
     if (musicUiState.tab === "library") {
       box.innerHTML = `
+        <div class="x-action-row" style="margin-bottom:12px;">
+          <button class="x-primary-btn" type="button" id="x-music-save-role-playlist">保存当前列表为角色歌单</button>
+          <button class="x-ghost-btn" type="button" id="x-music-load-role-playlist">加载角色歌单</button>
+          <button class="x-ghost-btn" type="button" id="x-music-clear-role-playlist">清空角色歌单</button>
+        </div>
+        <div class="x-profile-card" style="grid-template-columns:1fr;margin-bottom:12px;">
+          <div class="x-card-title">${escapeHtml(roleChat?.name || "当前角色")}的本地歌单</div>
+          <div class="x-card-sub">${rolePlaylist.length} 首 · 保存搜索/日推/网易云歌单结果后可一键加入播放器</div>
+        </div>
         <div class="x-playlist-list">
           ${
             musicUiState.playlists.length
@@ -1327,15 +1581,30 @@ ${text}`;
   async function refreshMusicProfile() {
     setStatus("正在读取网易云账号...");
     const data = await XMusic.loginStatus(getPanelCfg());
-    const profile = data?.data?.profile || data?.profile;
+    let profile = extractNeteaseProfile(data);
+    const uid = extractNeteaseUid(data);
+    if (!profile && uid) {
+      const detail = await XMusic.userDetail(uid, getPanelCfg()).catch(() => null);
+      profile = detail?.profile || detail?.data?.profile || { userId: uid, nickname: `UID ${uid}` };
+    }
     musicUiState.profile = profile || null;
     musicUiState.playlists = [];
-    if (profile?.userId) {
-      const playlists = await XMusic.userPlaylist(profile.userId, getPanelCfg()).catch(() => null);
-      musicUiState.playlists = playlists?.playlist || playlists?.data?.playlist || [];
+    const playlistUid = profile?.userId || uid;
+    if (playlistUid) {
+      const playlists = await XMusic.userPlaylist(playlistUid, getPanelCfg()).catch((error) => {
+        console.warn("[XMusic] playlist failed", error);
+        return null;
+      });
+      musicUiState.playlists = extractNeteasePlaylists(playlists);
     }
+    musicUiState.tab = "library";
     renderMusicHome();
-    setStatus(profile ? `已登录：${profile.nickname}` : "未登录或 Cookie 无效", !profile);
+    setStatus(
+      profile
+        ? `已登录：${profile.nickname || playlistUid}，歌单 ${musicUiState.playlists.length} 个`
+        : "未登录或 Cookie 无效",
+      !profile,
+    );
   }
 
   function bindPanelEvents(panel) {
@@ -1372,6 +1641,9 @@ ${text}`;
       if (target.id === "x-music-search") runMusicSearch();
       if (target.id === "x-music-daily") runMusicDaily();
       if (target.id === "x-music-fm") runMusicFm();
+      if (target.id === "x-music-save-role-playlist") saveCurrentRolePlaylist();
+      if (target.id === "x-music-load-role-playlist") loadCurrentRolePlaylist();
+      if (target.id === "x-music-clear-role-playlist") clearCurrentRolePlaylist();
       if (target.dataset.songAdd) addSong(musicUiState.songs[Number(target.dataset.songAdd)], false);
       if (target.dataset.songPlay) addSong(musicUiState.songs[Number(target.dataset.songPlay)], true);
       if (target.dataset.playlistId) loadPlaylistSongs(target.dataset.playlistId);
@@ -1429,6 +1701,34 @@ ${text}`;
     } catch (error) {
       setStatus(error.message || "读取歌单失败", true);
     }
+  }
+
+  function saveCurrentRolePlaylist() {
+    const chat = getCurrentChatForIntegrations();
+    if (!chat) return setStatus("请先进入一个角色聊天，再保存角色歌单", true);
+    if (!musicUiState.songs.length) return setStatus("当前没有歌曲列表可保存", true);
+    const saved = setRolePlaylist(chat.id, musicUiState.songs);
+    musicUiState.tab = "library";
+    renderMusicHome();
+    setStatus(`已保存 ${saved.length} 首到「${chat.name}」的角色歌单`);
+  }
+
+  function loadCurrentRolePlaylist() {
+    const chat = getCurrentChatForIntegrations();
+    if (!chat) return setStatus("请先进入一个角色聊天，再加载角色歌单", true);
+    const songs = getRolePlaylist(chat.id);
+    if (!songs.length) return setStatus(`「${chat.name}」还没有角色歌单`, true);
+    renderSongs(songs);
+    setStatus(`已载入「${chat.name}」的 ${songs.length} 首角色歌单`);
+  }
+
+  function clearCurrentRolePlaylist() {
+    const chat = getCurrentChatForIntegrations();
+    if (!chat) return setStatus("请先进入一个角色聊天", true);
+    setRolePlaylist(chat.id, []);
+    musicUiState.tab = "library";
+    renderMusicHome();
+    setStatus(`已清空「${chat.name}」的角色歌单`);
   }
 
   async function startQrLogin() {
@@ -1574,7 +1874,9 @@ ${text}`;
               <div class="x-field"><label>Base URL</label><input id="x-vector-base-url" class="x-input" type="url" placeholder="https://api.siliconflow.cn/v1" /></div>
               <div class="x-field"><label>API Key</label><input id="x-vector-api-key" class="x-input" type="password" /></div>
               <div class="x-field"><label>模型</label><input id="x-vector-model" class="x-input" type="text" /></div>
+              <select id="x-vector-model-list" class="x-select" style="display:none;"></select>
               <div class="x-field"><label>维度</label><input id="x-vector-dimensions" class="x-input" type="number" min="1" step="1" /></div>
+              <button id="x-vector-fetch-models" class="x-ghost-btn" type="button">拉取 Embedding 模型</button>
             </div>
             <div style="height:12px;"></div>
             <div class="x-config-card">
@@ -1582,7 +1884,9 @@ ${text}`;
               <div class="x-field"><label>Base URL</label><input id="x-light-base-url" class="x-input" type="url" placeholder="https://api.openai.com" /></div>
               <div class="x-field"><label>API Key</label><input id="x-light-api-key" class="x-input" type="password" /></div>
               <div class="x-field"><label>模型</label><input id="x-light-model" class="x-input" type="text" placeholder="gpt-4o-mini" /></div>
+              <select id="x-light-model-list" class="x-select" style="display:none;"></select>
               <div class="x-field"><label>Temperature</label><input id="x-light-temperature" class="x-input" type="number" min="0" max="2" step="0.1" /></div>
+              <button id="x-light-fetch-models" class="x-ghost-btn" type="button">拉取副 API 模型</button>
             </div>
             <div style="height:12px;"></div>
             <div class="x-config-card">
@@ -1787,6 +2091,24 @@ ${text}`;
         saveMemoryConfigsFromPanel();
         setVectorStatus("配置已保存");
       }
+      if (target.id === "x-vector-fetch-models" || target.id === "x-light-fetch-models") {
+        const isVector = target.id === "x-vector-fetch-models";
+        setVectorStatus(isVector ? "正在拉取 Embedding 模型列表..." : "正在拉取副 API 模型列表...");
+        try {
+          const models = await fetchModelList(
+            document.getElementById(isVector ? "x-vector-base-url" : "x-light-base-url").value,
+            document.getElementById(isVector ? "x-vector-api-key" : "x-light-api-key").value,
+          );
+          fillModelSelect(
+            isVector ? "x-vector-model-list" : "x-light-model-list",
+            isVector ? "x-vector-model" : "x-light-model",
+            models,
+          );
+          setVectorStatus(`已拉取 ${models.length} 个模型`);
+        } catch (error) {
+          setVectorStatus(error.message || "拉取模型失败", true);
+        }
+      }
       if (target.id === "x-vector-add") {
         const chat = getSelectedMemoryChat();
         const content = document.getElementById("x-vector-content").value.trim();
@@ -1907,6 +2229,8 @@ ${text}`;
     window.XMusic = XMusic;
     window.XVectorStore = XVectorStore;
     window.XMemoryPalace = XMemoryPalace;
+    window.XFetchModelList = fetchModelList;
+    installRoleApiSettingsPanel();
     installDesktopIcon();
   }
 
